@@ -3,6 +3,10 @@
 #include <hiredis/hiredis.h>
 #include <unp.h>
 #include <pthread.h>
+#include <mysql.h>
+
+
+
 
 //---------------------------------------------------全局变量
 int listenfd;//监听套接字
@@ -10,6 +14,9 @@ int nowconnect=0;//当前连接人数
 int socketfd[100];//连接队列
 const int maxsize=100;//最大连接数
 redisContext* context;//redis连接句柄
+MYSQL* conn;
+MYSQL_RES* res;
+MYSQL_ROW row;
 struct sockaddr_in servaddr;//服务器信息
 //---------------------------------------------------全局变量
 
@@ -22,7 +29,7 @@ void init()
     servaddr.sin_addr.s_addr=htonl(INADDR_ANY);
     Bind(listenfd,(SA*)&servaddr,sizeof(servaddr));
     Listen(listenfd,100);
-    printf("server argument initialized successful!\n");
+    printf("Server argument initialized successful!\n");
 }
 void redisconnect()
 {
@@ -34,33 +41,79 @@ void redisconnect()
         return ;
     }
     
-    printf("connect redisServer success\n");
+    printf("Connect redisServer success!\n");
 }
-
+void mysqlconnect()
+{
+    conn=mysql_init(NULL);
+    if(mysql_real_connect(conn,"localhost","root","geliang8888","book",0,NULL,0))
+    printf("Connect mysqlServer success!\n");
+}
 int borrow(int fd)
  {
      char query[20];
+     char temp[100];
+     bzero(&temp,sizeof(temp));
      bzero(&query,sizeof(query));
      recv(fd,query,sizeof(query),0);
      redisReply *reply = (redisReply *)redisCommand(context, "get %s",query);
      //printf("get value %s\n",reply->str);
      if(NULL == reply)
         {
-            printf("command execute failure1\n");
-            redisFree(context);
+            printf("redis command err:%s\n",context->errstr);
+            freeReplyObject(reply);
             return 0;
         }
      if(reply->type==REDIS_REPLY_NIL)
      {
-         freeReplyObject(reply);
-         return 2;
+         sprintf(temp,"select* from bookinfo where bookname='%s'",query);
+         mysql_query(conn,temp);
+         res=mysql_store_result(conn);
+         if(res==NULL)
+         {
+             printf("res is NULL\n");
+             freeReplyObject(reply);
+             return 2;
+         }
+         else
+         {
+             printf("query from mysql!\n");
+             row=mysql_fetch_row(res);
+             if(row==NULL)
+             {
+                 freeReplyObject(reply);
+                 return 2;
+             }
+             char* bookname=row[0];
+             char* status=row[1];
+             if(strcmp(status,"0")==0)
+             {
+                 redisCommand(context, "set %s %s",bookname,"0");
+                 redisCommand(context, "expire %s %s",bookname,"10");
+                 freeReplyObject(reply);
+                 return 3;
+             }
+             bzero(&temp,sizeof(temp));
+             sprintf(temp,"update bookinfo set status='%s' where bookname='%s'","0",bookname);
+             mysql_query(conn, temp);
+             redisCommand(context, "set %s %s",bookname,"0");
+             redisCommand(context, "expire %s %s",bookname,"10");
+             freeReplyObject(reply);
+             return 1;
+         }
      }
      if(strcmp(reply->str,"0")==0)
      {
+         printf("query from redis!\n");
          freeReplyObject(reply);
          return 3;
      }
+     printf("query from redis!\n");
      redisCommand(context, "set %s %s",query,"0");
+     redisCommand(context, "expire %s 10",query);
+     bzero(&temp,sizeof(temp));
+     sprintf(temp,"update bookinfo set status='%s' where bookname='%s","0",query);
+     mysql_query(conn, temp);
      freeReplyObject(reply);
      return 1;
  }
@@ -88,6 +141,7 @@ int giveback(int fd)
         return 2;
     }
     redisCommand(context, "set %s %s",query,"1");
+    redisCommand(context, "expire %s 10",query);
     freeReplyObject(reply);
     return 3;
  }
@@ -164,7 +218,7 @@ void* userfunc(void* arg)
 }
 void service()
 {
-    printf("the server has started!\n");
+    printf("The server has started!\n");
     while(1)
     {
         struct sockaddr_in cliaddr;
@@ -196,6 +250,7 @@ void service()
 int main(void)
 {
     init();
+    mysqlconnect();
     redisconnect();
     service();
 }
